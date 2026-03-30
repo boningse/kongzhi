@@ -21,6 +21,7 @@ import sharedRoutes from './routes/shared.js'
 import usersRoutes from './routes/users.js'
 import distributionsRoutes from './routes/distributions.js'
 import deviceTypesRoutes from './routes/device_types.js'
+import pointsRoutes from './routes/points.js'
 import { query } from './db.js'
 import { initMqtt } from './mqtt.js'
 
@@ -74,6 +75,19 @@ const initDb = async () => {
       if (e.code !== '42701') console.error('Failed to alter table:', e);
     }
 
+    // Ensure raw_mqtt_logs has gateway_sncode for joins and filtering
+    try {
+      await query('ALTER TABLE raw_mqtt_logs ADD COLUMN gateway_sncode VARCHAR(64);');
+      console.log('Added gateway_sncode column to raw_mqtt_logs');
+    } catch (e: any) {
+      if (e.code !== '42701') console.error('Failed to alter raw_mqtt_logs table:', e);
+    }
+    try {
+      await query('CREATE INDEX IF NOT EXISTS idx_raw_mqtt_logs_time ON raw_mqtt_logs(received_at DESC);');
+    } catch (e) {
+      console.error('Failed to create index on raw_mqtt_logs:', e);
+    }
+
     try {
       await query(`
         CREATE TABLE IF NOT EXISTS device_types (
@@ -98,6 +112,26 @@ const initDb = async () => {
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(device_type_id, function_code)
         );
+      `);
+      await query(`
+        CREATE TABLE IF NOT EXISTS project_points (
+            id SERIAL PRIMARY KEY,
+            project_id INT REFERENCES projects(id) ON DELETE CASCADE,
+            name VARCHAR(128) NOT NULL,
+            insname VARCHAR(128),
+            propertyno VARCHAR(64),
+            device_code VARCHAR(128),
+            gateway_sncode VARCHAR(64),
+            status VARCHAR(32) DEFAULT 'ACTIVE',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+      // reset unique index to (project_id, insname)
+      try { await query(`DROP INDEX IF EXISTS idx_project_points_unique;`); } catch (e) {}
+      await query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_project_points_unique_ins
+        ON project_points (project_id, COALESCE(insname,''));
       `);
       console.log('Device types tables ensured');
     } catch (e) {
@@ -150,6 +184,7 @@ app.use('/api/shared', sharedRoutes)
 app.use('/api/users', usersRoutes)
 app.use('/api/distributions', distributionsRoutes)
 app.use('/api/device-types', deviceTypesRoutes)
+app.use('/api/points', pointsRoutes)
 
 /**
  * health

@@ -206,12 +206,85 @@ async function ingestPayload(payload: any) {
     let queryText = `INSERT INTO ${tableName} (gateway_sncode, device_code, point_name, insname, propertyno, paraname, quality, value, ts) VALUES `;
     let paramIndex = 1;
 
+    // 准备点位映射：按项目加载映射，键为 insname|propertyno|device_code|gateway_sncode（均做规范化）
+    let pointMap: Map<string, string> | null = null;
+    try {
+      const projRes = await query('SELECT project_id FROM gateway_info WHERE sncode = $1', [sncode]);
+      const projectId = projRes.rows?.[0]?.project_id || null;
+      if (projectId) {
+        const pp = await query(
+          "SELECT name, COALESCE(insname,'') insname, COALESCE(propertyno,'') propertyno, COALESCE(device_code,'') device_code, COALESCE(gateway_sncode,'') gateway_sncode FROM project_points WHERE (project_id = $1 OR gateway_sncode = $2) AND status = 'ACTIVE'",
+          [projectId, sncode]
+        );
+        const norm = (v: any) => (v ?? '').toString().trim();
+        const starToEmpty = (s: string) => (s === '*' ? '' : s);
+        const normProp = (v: any) => {
+          const s = norm(v);
+          if (s === '*') return '';
+          if (s === '') return '';
+          const t = s.replace(/^0+/, '');
+          return t === '' ? '0' : t;
+        };
+        pointMap = new Map();
+        for (const r of pp.rows) {
+          const ni = starToEmpty(norm(r.insname));
+          const np = normProp(r.propertyno);
+          const nd = starToEmpty(norm(r.device_code));
+          const ns = starToEmpty(norm(r.gateway_sncode));
+          const keys = new Set<string>([
+            `${ni}|${np}|${nd}|${ns}`,  // full key
+            `${ni}|||${ns}`,            // SN + insname
+            `${ni}|${np}||${ns}`,       // SN + insname + propertyno
+            `|${np}||${ns}`,            // SN + propertyno
+            `|${np}|${nd}|${ns}`,       // SN + propertyno + device_code
+            `${ni}|${np}|${nd}|`        // no SN fallback
+          ]);
+          for (const k of keys) {
+            if (!pointMap.has(k)) pointMap.set(k, r.name);
+          }
+        }
+      }
+    } catch (e) {
+      console.error('Load project points failed:', e);
+    }
+    const resolvePointName = (insname?: string, propertyno?: string, deviceCode?: string) => {
+      if (!pointMap) return '';
+      const norm = (v: any) => (v ?? '').toString().trim();
+      const starToEmpty = (s: string) => (s === '*' ? '' : s);
+      const normProp = (v: any) => {
+        const s = norm(v);
+        if (s === '*') return '';
+        if (s === '') return '';
+        const t = s.replace(/^0+/, '');
+        return t === '' ? '0' : t;
+      };
+      const ni = starToEmpty(norm(insname));
+      const np = normProp(propertyno);
+      const nd = starToEmpty(norm(deviceCode));
+      const ns = starToEmpty(norm(sncode));
+      // 优先按 网关SN + insname 精确匹配，其次再考虑 propertyno / device_code
+      const keyCandidates = [
+        `${ni}|||${ns}`,           // by SN + insname
+        `${ni}|${np}||${ns}`,      // by SN + insname + propertyno
+        `|${np}||${ns}`,           // by SN + propertyno （少见但兼容）
+        `${ni}|${np}|${nd}|${ns}`, // full with SN
+        `${ni}|${np}|${nd}|`,      // no SN
+        `|${np}|${nd}|${ns}`       // propertyno + device_code + SN
+      ];
+      for (const k of keyCandidates) {
+        const v = pointMap.get(k);
+        if (v) return v;
+      }
+      return '';
+    };
+
     if (Array.isArray(dev)) {
       for (const pt of dev) {
         // 如果是 V4 数组格式，直接使用 insname 作为 point_name，如果有 dev 字段，则使用 dev 字段作为 device_code，否则也留空
         const valStr = pt.value === null ? '' : String(pt.value);
+        const pName = resolvePointName(pt.insname || pt.pn, pt.propertyno, pt.dev || '');
         queryText += `($${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}), `;
-        values.push(sncode, pt.dev || '', pt.insname || pt.propertyno || '', pt.insname || '', pt.propertyno || '', pt.paraname || '', pt.quality || 0, valStr, ts);
+        values.push(sncode, pt.dev || '', pName || pt.insname || pt.propertyno || '', pt.insname || '', pt.propertyno || '', pt.paraname || '', pt.quality || 0, valStr, ts);
       }
     } else {
       for (const [deviceCode, points] of Object.entries(dev)) {
@@ -219,8 +292,9 @@ async function ingestPayload(payload: any) {
         for (const pt of pointsArray) {
           // Only process if q == 1 (quality valid)
           if (pt.q === 1) {
+            const pName = resolvePointName((pt as any).insname || pt.pn, (pt as any).propertyno, deviceCode);
             queryText += `($${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}), `;
-            values.push(sncode, deviceCode, pt.pn, '', '', '', pt.q, pt.v, ts);
+            values.push(sncode, deviceCode, pName || pt.pn, '', '', '', pt.q, pt.v, ts);
           }
         }
       }

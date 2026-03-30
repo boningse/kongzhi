@@ -92,10 +92,37 @@ const ApiConfig: React.FC = () => {
     }
   };
 
-  const handleCopy = (token: string, id: string) => {
-    navigator.clipboard.writeText(token);
-    setCopiedId(id);
-    setTimeout(() => setCopiedId(null), 2000);
+  const handleCopy = async (token: string, id: string) => {
+    let success = false;
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(token);
+        success = true;
+      }
+    } catch (e) {
+      // fall through to legacy path
+    }
+    if (!success) {
+      try {
+        const textarea = document.createElement('textarea');
+        textarea.value = token;
+        textarea.style.position = 'fixed';
+        textarea.style.top = '-9999px';
+        textarea.style.left = '-9999px';
+        textarea.setAttribute('readonly', '');
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+        success = true;
+      } catch {}
+    }
+    if (success) {
+      setCopiedId(id);
+      setTimeout(() => setCopiedId(null), 2000);
+    } else {
+      alert('复制失败，请手动选择并复制 Token');
+    }
   };
 
   const handleProjectToggle = (projectId: number) => {
@@ -228,6 +255,8 @@ const ApiConfig: React.FC = () => {
                     <p><strong>请求路径:</strong> <code className="bg-white border border-gray-200 px-2 py-1 rounded text-pink-600 font-mono">GET /api/shared/telemetry</code></p>
                     <p><strong>请求方式:</strong> <code className="bg-white border border-gray-200 px-2 py-1 rounded text-blue-600 font-mono">GET</code></p>
                     <p><strong>鉴权方式:</strong> 在 HTTP Header 中添加 <code className="bg-white border border-gray-200 px-2 py-1 rounded font-mono">Authorization: Bearer &lt;您的Token&gt;</code></p>
+                    <p><strong>查询参数(可选):</strong> <code className="bg-white border border-gray-200 px-2 py-1 rounded font-mono">start</code>、<code className="bg-white border border-gray-200 px-2 py-1 rounded font-mono">end</code>、<code className="bg-white border border-gray-200 px-2 py-1 rounded font-mono">limit</code></p>
+                    <p className="text-xs text-gray-500">时间格式支持 ISO，例如 <span className="font-mono">2026-03-01T00:00:00Z</span>；仅传 <span className="font-mono">start</span> 或 <span className="font-mono">end</span> 也可生效。默认返回最近 500 条；设置时间段后默认上限 5000，可通过 <span className="font-mono">limit</span> (1-20000) 调整。</p>
                   </div>
                 </div>
 
@@ -238,7 +267,7 @@ const ApiConfig: React.FC = () => {
                       系统底层采用<strong>按月动态分表</strong>存储机制以应对海量数据。但在调用此接口时，第三方系统<strong>完全不需要关心分表逻辑</strong>。
                     </p>
                     <p>
-                      该接口会自动执行跨表聚合查询，返回授权项目中最新的遥测数据。默认按时间倒序（最新的在前）返回。
+                      该接口会自动执行跨表聚合查询，返回授权项目中的数据。默认按时间倒序（最新在前），支持按时间段筛选（<span className="font-mono">start</span>/<span className="font-mono">end</span>）。
                     </p>
                   </div>
                 </div>
@@ -246,17 +275,29 @@ const ApiConfig: React.FC = () => {
                 <div>
                   <h4 className="text-base font-bold text-gray-900 mb-3 flex items-center"><span className="w-6 h-6 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-sm mr-2">3</span>调用代码示例 (cURL)</h4>
                   <div className="bg-gray-900 text-gray-100 p-4 rounded-lg font-mono text-sm overflow-x-auto">
-                    curl -X GET http://&lt;服务器IP&gt;:&lt;端口&gt;/api/shared/telemetry \<br/>
+                    curl -X GET "http://&lt;服务器IP&gt;:&lt;端口&gt;/api/shared/telemetry?start=2026-03-01T00:00:00Z&amp;end=2026-03-30T23:59:59Z&amp;limit=2000" \<br/>
                     &nbsp;&nbsp;-H "Authorization: Bearer YOUR_GENERATED_TOKEN_HERE" \<br/>
                     &nbsp;&nbsp;-H "Accept: application/json"
                   </div>
                 </div>
 
                 <div>
-                  <h4 className="text-base font-bold text-gray-900 mb-3 flex items-center"><span className="w-6 h-6 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-sm mr-2">4</span>响应数据结构示例</h4>
+                  <h4 className="text-base font-bold text-gray-900 mb-3 flex items-center"><span className="w-6 h-6 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-sm mr-2">4</span>返回码说明</h4>
+                  <div className="bg-gray-50 rounded-lg p-4 border border-gray-100 text-sm text-gray-700">
+                    <p className="mb-1"><span className="font-mono px-2 py-0.5 bg-green-100 text-green-700 rounded">code: 0</span> 成功</p>
+                    <p className="mb-1"><span className="font-mono px-2 py-0.5 bg-yellow-100 text-yellow-700 rounded">code: 400</span> 参数错误（如时间格式无效、start &gt; end 等）</p>
+                    <p className="mb-1"><span className="font-mono px-2 py-0.5 bg-red-100 text-red-700 rounded">code: 401</span> 未授权或令牌失效</p>
+                    <p className="mb-1"><span className="font-mono px-2 py-0.5 bg-red-100 text-red-700 rounded">code: 403</span> 权限不足（令牌不包含该项目）</p>
+                    <p className="mb-1"><span className="font-mono px-2 py-0.5 bg-red-100 text-red-700 rounded">code: 500</span> 服务器内部错误</p>
+                  </div>
+                </div>
+
+                <div>
+                  <h4 className="text-base font-bold text-gray-900 mb-3 flex items-center"><span className="w-6 h-6 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-sm mr-2">5</span>响应数据结构示例</h4>
                   <div className="bg-gray-900 text-gray-100 p-4 rounded-lg font-mono text-sm overflow-x-auto whitespace-pre">
 {`{
   "success": true,
+  "code": 0,
   "data": [
     {
       "id": "10023",

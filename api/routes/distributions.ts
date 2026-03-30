@@ -1,6 +1,7 @@
 import express, { Request, Response } from 'express';
 import { query } from '../db.js';
 import { verifyUserToken } from './auth.js';
+import { distributeDataForDist } from '../distributor.js';
 
 const router = express.Router();
 
@@ -55,19 +56,17 @@ router.get('/', async (req: Request, res: Response) => {
 
 // Create a new distribution
 router.post('/', async (req: Request, res: Response) => {
-  const { name, project_ids, source_data_info, target_db_type, target_db_config, status } = req.body;
+  const { name, project_ids, source_data_info, target_db_type, target_db_config, status, start_time } = req.body;
   try {
     const defaultStatus = status || 'ACTIVE';
     const isStarting = defaultStatus === 'ACTIVE';
-    const startCols = isStarting ? ', start_time' : '';
-    const startVals = isStarting ? ', CURRENT_TIMESTAMP' : '';
-
-    const result = await query(
-      `INSERT INTO data_distributions 
-        (name, project_ids, source_data_info, target_db_type, target_db_config, status${startCols}) 
-       VALUES ($1, $2, $3, $4, $5, $6${startVals}) RETURNING *`,
-      [name, project_ids || [], source_data_info, target_db_type, target_db_config, defaultStatus]
-    );
+    const hasStart = !!start_time;
+    const text = `INSERT INTO data_distributions 
+      (name, project_ids, source_data_info, target_db_type, target_db_config, status, start_time) 
+      VALUES ($1, $2, $3, $4, $5, $6, ${hasStart ? '$7' : (isStarting ? 'CURRENT_TIMESTAMP' : 'NULL')}) RETURNING *`;
+    const params: any[] = [name, project_ids || [], source_data_info, target_db_type, target_db_config, defaultStatus];
+    if (hasStart) params.push(new Date(start_time));
+    const result = await query(text, params);
     res.json({ success: true, message: 'Distribution created', data: result.rows[0] });
   } catch (error) {
     console.error('Error creating distribution:', error);
@@ -103,7 +102,7 @@ router.put('/:id/status', async (req: Request, res: Response) => {
 // Update a distribution
 router.put('/:id', async (req: Request, res: Response) => {
   const { id } = req.params;
-  const { name, project_ids, source_data_info, target_db_type, target_db_config, status } = req.body;
+  const { name, project_ids, source_data_info, target_db_type, target_db_config, status, start_time } = req.body;
   try {
     const prevDist = await query('SELECT status FROM data_distributions WHERE id = $1', [parseInt(id, 10)]);
     if (prevDist.rowCount === 0) {
@@ -112,19 +111,47 @@ router.put('/:id', async (req: Request, res: Response) => {
     
     const wasActive = prevDist.rows[0].status === 'ACTIVE';
     const isNowActive = status === 'ACTIVE';
-    const startTimeUpdate = (!wasActive && isNowActive) ? ', start_time = CURRENT_TIMESTAMP' : '';
+    let startTimeUpdate = '';
+    const params: any[] = [name, project_ids || [], source_data_info, target_db_type, target_db_config, status];
+    if (start_time !== undefined && start_time !== null && start_time !== '') {
+      startTimeUpdate = ', start_time = $7';
+      params.push(new Date(start_time));
+    } else if (!wasActive && isNowActive) {
+      startTimeUpdate = ', start_time = CURRENT_TIMESTAMP';
+    }
 
-    const result = await query(
-      `UPDATE data_distributions 
-       SET name = $1, project_ids = $2, source_data_info = $3, target_db_type = $4, target_db_config = $5, status = $6, updated_at = CURRENT_TIMESTAMP${startTimeUpdate}
-       WHERE id = $7 RETURNING *`,
-      [name, project_ids || [], source_data_info, target_db_type, target_db_config, status, parseInt(id, 10)]
-    );
+    params.push(parseInt(id, 10));
+    const text = `UPDATE data_distributions 
+      SET name = $1, project_ids = $2, source_data_info = $3, target_db_type = $4, target_db_config = $5, status = $6, updated_at = CURRENT_TIMESTAMP${startTimeUpdate}
+      WHERE id = $${params.length} RETURNING *`;
+    const result = await query(text, params);
     
     res.json({ success: true, message: 'Distribution updated', data: result.rows[0] });
   } catch (error) {
     console.error('Error updating distribution:', error);
     res.status(500).json({ success: false, error: 'Failed to update distribution' });
+  }
+});
+
+// Set custom start time (补发开始时间)
+router.put('/:id/start-time', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const { start_time } = req.body as { start_time?: string };
+  try {
+    if (!start_time) {
+      return res.status(400).json({ success: false, error: 'start_time 必填' });
+    }
+    const result = await query(
+      `UPDATE data_distributions SET start_time = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *`,
+      [new Date(start_time), parseInt(id, 10)]
+    );
+    if (result.rowCount === 0) {
+      return res.status(404).json({ success: false, error: 'Distribution not found' });
+    }
+    res.json({ success: true, message: 'Start time updated', data: result.rows[0] });
+  } catch (error) {
+    console.error('Error updating start time:', error);
+    res.status(500).json({ success: false, error: 'Failed to update start time' });
   }
 });
 
@@ -137,6 +164,79 @@ router.delete('/:id', async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Error deleting distribution:', error);
     res.status(500).json({ success: false, error: 'Failed to delete distribution' });
+  }
+});
+
+// Replay (补发) historical data for a distribution
+router.post('/:id/replay', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const { start, end } = req.body as { start: string; end?: string };
+  try {
+    const distRes = await query(`SELECT id, project_ids FROM data_distributions WHERE id = $1`, [parseInt(id, 10)]);
+    if (distRes.rowCount === 0) {
+      return res.status(404).json({ success: false, error: 'Distribution not found' });
+    }
+    const dist = distRes.rows[0] as { id: number; project_ids: number[] };
+    const startTime = new Date(start);
+    if (!startTime || isNaN(startTime.getTime())) {
+      return res.status(400).json({ success: false, error: 'Invalid start time' });
+    }
+    const endTime = end ? new Date(end) : new Date();
+    if (isNaN(endTime.getTime())) {
+      return res.status(400).json({ success: false, error: 'Invalid end time' });
+    }
+    if (startTime > endTime) {
+      return res.status(400).json({ success: false, error: 'start must be earlier than end' });
+    }
+
+    // Collect year-months
+    const months: string[] = [];
+    const cursor = new Date(Date.UTC(startTime.getUTCFullYear(), startTime.getUTCMonth(), 1));
+    const endCursor = new Date(Date.UTC(endTime.getUTCFullYear(), endTime.getUTCMonth(), 1));
+    while (cursor <= endCursor) {
+      const y = cursor.getUTCFullYear();
+      const m = String(cursor.getUTCMonth() + 1).padStart(2, '0');
+      months.push(`telemetry_data_${y}_${m}`);
+      cursor.setUTCMonth(cursor.getUTCMonth() + 1);
+    }
+
+    // Process per-month tables in batches
+    const limit = 1000;
+    for (const table of months) {
+      let offset = 0;
+      // best-effort: table may not exist
+      /* eslint-disable no-constant-condition */
+      while (true) {
+        const rowsRes = await query(
+          `
+          WITH RECURSIVE project_tree AS (
+            SELECT id FROM projects WHERE id = ANY($1::int[])
+            UNION
+            SELECT p.id FROM projects p INNER JOIN project_tree pt ON p.parent_id = pt.id
+          )
+          SELECT t.gateway_sncode, t.insname, t.propertyno, t.value, t.ts
+          FROM ${table} t
+          LEFT JOIN gateway_info g ON t.gateway_sncode = g.sncode
+          WHERE g.project_id IN (SELECT id FROM project_tree)
+            AND t.ts >= $2 AND t.ts <= $3
+          ORDER BY t.ts ASC
+          LIMIT $4 OFFSET $5
+          `,
+          [dist.project_ids, startTime.toISOString(), endTime.toISOString(), limit, offset]
+        ).catch(() => ({ rowCount: 0, rows: [] as any[] } as any));
+        if (!rowsRes || rowsRes.rowCount === 0) break;
+        for (const row of rowsRes.rows) {
+          await distributeDataForDist(dist.id, row.gateway_sncode, [{ insname: row.insname, propertyno: row.propertyno, value: row.value }], new Date(row.ts));
+        }
+        if (rowsRes.rowCount < limit) break;
+        offset += limit;
+      }
+    }
+
+    res.json({ success: true, message: 'Replay task completed (best-effort)' });
+  } catch (error) {
+    console.error('Error replaying distribution:', error);
+    res.status(500).json({ success: false, error: 'Failed to replay distribution' });
   }
 });
 

@@ -132,3 +132,19 @@ CREATE TABLE IF NOT EXISTS device_type_functions (
     UNIQUE(device_type_id, function_code)
 );
 
+-- 点位管理：按项目维护自定义点位名称
+CREATE TABLE IF NOT EXISTS project_points (
+    id SERIAL PRIMARY KEY,
+    project_id INT REFERENCES projects(id) ON DELETE CASCADE,
+    name VARCHAR(128) NOT NULL,
+    insname VARCHAR(128),
+    propertyno VARCHAR(64),
+    device_code VARCHAR(128),
+    gateway_sncode VARCHAR(64),
+    status VARCHAR(32) DEFAULT 'ACTIVE',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+DROP INDEX IF EXISTS idx_project_points_unique;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_project_points_unique_ins
+ON project_points (project_id, COALESCE(insname,''));

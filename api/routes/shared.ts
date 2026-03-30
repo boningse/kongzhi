@@ -8,7 +8,7 @@ const router = express.Router();
 const verifyToken = async (req: Request, res: Response, next: NextFunction) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ success: false, error: 'Unauthorized: Missing or invalid token' });
+    return res.status(401).json({ success: false, code: 401, error: 'Unauthorized: Missing or invalid token' });
   }
 
   const token = authHeader.split(' ')[1];
@@ -16,7 +16,7 @@ const verifyToken = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const result = await query("SELECT * FROM api_tokens WHERE token = $1 AND status = 'ACTIVE'", [token]);
     if (result.rows.length === 0) {
-      return res.status(401).json({ success: false, error: 'Unauthorized: Invalid or inactive token' });
+      return res.status(401).json({ success: false, code: 401, error: 'Unauthorized: Invalid or inactive token' });
     }
     
     // Attach token info to request for later use
@@ -24,7 +24,7 @@ const verifyToken = async (req: Request, res: Response, next: NextFunction) => {
     next();
   } catch (error) {
     console.error('Error verifying token:', error);
-    res.status(500).json({ success: false, error: 'Internal server error' });
+    res.status(500).json({ success: false, code: 500, error: 'Internal server error' });
   }
 };
 
@@ -36,6 +36,29 @@ router.get('/telemetry', async (req: Request, res: Response) => {
   try {
     const tokenInfo = (req as any).apiToken;
     const projectIds: number[] = tokenInfo.project_ids || [];
+    const { start, end, limit } = req.query as { start?: string; end?: string; limit?: string };
+
+    // Parse time range if provided
+    let startDate: Date | null = null;
+    let endDate: Date | null = null;
+    if (start) {
+      const s = new Date(start);
+      if (isNaN(s.getTime())) {
+        return res.status(400).json({ success: false, code: 400, error: 'Invalid start time format' });
+      }
+      startDate = s;
+    }
+    if (end) {
+      const e = new Date(end);
+      if (isNaN(e.getTime())) {
+        return res.status(400).json({ success: false, code: 400, error: 'Invalid end time format' });
+      }
+      endDate = e;
+    }
+    if (startDate && endDate && startDate > endDate) {
+      return res.status(400).json({ success: false, code: 400, error: 'start must be earlier than end' });
+    }
+    const rowLimit = Math.min(Math.max(parseInt(limit || '0', 10) || (startDate || endDate ? 5000 : 500), 1), 20000);
     
     // Find all telemetry_data_* tables
     const tableResult = await query(`
@@ -46,12 +69,30 @@ router.get('/telemetry', async (req: Request, res: Response) => {
     `);
     
     if (tableResult.rows.length === 0) {
-      return res.json({ success: true, data: [] });
+      return res.json({ success: true, code: 0, data: [] });
     }
 
-    const unionQuery = tableResult.rows
-      .map(row => `SELECT * FROM ${row.table_name}`)
-      .join(' UNION ALL ');
+    // If a time range is provided, try to only union the involved months to reduce scan
+    let tableNames: string[] = tableResult.rows.map(r => r.table_name);
+    if (startDate || endDate) {
+      const months = new Set<string>();
+      const from = new Date(startDate || new Date(0));
+      const to = new Date(endDate || new Date());
+      const cursor = new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), 1));
+      const endCursor = new Date(Date.UTC(to.getUTCFullYear(), to.getUTCMonth(), 1));
+      while (cursor <= endCursor) {
+        const y = cursor.getUTCFullYear();
+        const m = String(cursor.getUTCMonth() + 1).padStart(2, '0');
+        months.add(`telemetry_data_${y}_${m}`);
+        cursor.setUTCMonth(cursor.getUTCMonth() + 1);
+      }
+      tableNames = tableNames.filter(n => months.has(n));
+      if (tableNames.length === 0) {
+        return res.json({ success: true, code: 0, data: [] });
+      }
+    }
+
+    const unionQuery = tableNames.map(n => `SELECT * FROM ${n}`).join(' UNION ALL ');
 
     const queryParams: any[] = [];
     let sql = '';
@@ -86,13 +127,27 @@ router.get('/telemetry', async (req: Request, res: Response) => {
       `;
     }
 
-    sql += ` ORDER BY t.ts DESC LIMIT 500`;
+    // Append time range filters if provided
+    const whereClauses: string[] = [];
+    if (startDate) {
+      whereClauses.push(`t.ts >= $${queryParams.length + 1}`);
+      queryParams.push(startDate.toISOString());
+    }
+    if (endDate) {
+      whereClauses.push(`t.ts <= $${queryParams.length + 1}`);
+      queryParams.push(endDate.toISOString());
+    }
+    if (whereClauses.length > 0) {
+      sql += ` AND ${whereClauses.join(' AND ')}`;
+    }
+
+    sql += ` ORDER BY t.ts DESC LIMIT ${rowLimit}`;
 
     const result = await query(sql, queryParams);
-    res.json({ success: true, data: result.rows });
+    res.json({ success: true, code: 0, data: result.rows });
   } catch (error) {
     console.error('Error fetching shared telemetry data:', error);
-    res.status(500).json({ success: false, error: 'Failed to fetch data' });
+    res.status(500).json({ success: false, code: 500, error: 'Failed to fetch data' });
   }
 });
 
@@ -101,7 +156,7 @@ router.post('/control', async (req: Request, res: Response) => {
   try {
     const { sncode, command } = req.body;
     if (!sncode || !command) {
-      return res.status(400).json({ success: false, error: 'Missing sncode or command in request body' });
+      return res.status(400).json({ success: false, code: 400, error: 'Missing sncode or command in request body' });
     }
 
     const tokenInfo = (req as any).apiToken;
@@ -110,7 +165,7 @@ router.post('/control', async (req: Request, res: Response) => {
     // 1. Check if the gateway exists and get its publish_topic and project_id
     const gwResult = await query('SELECT project_id, publish_topic, status FROM gateway_info WHERE sncode = $1', [sncode]);
     if (gwResult.rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'Gateway not found' });
+      return res.status(404).json({ success: false, code: 404, error: 'Gateway not found' });
     }
 
     const gateway = gwResult.rows[0];
@@ -129,19 +184,19 @@ router.post('/control', async (req: Request, res: Response) => {
       `, [projectIds, gateway.project_id]);
 
       if (allowedResult.rows.length === 0) {
-        return res.status(403).json({ success: false, error: 'Permission denied for this gateway' });
+        return res.status(403).json({ success: false, code: 403, error: 'Permission denied for this gateway' });
       }
     }
 
     // 3. Check if publish_topic is configured
     if (!gateway.publish_topic) {
-      return res.status(400).json({ success: false, error: 'Gateway has no publish_topic configured' });
+      return res.status(400).json({ success: false, code: 400, error: 'Gateway has no publish_topic configured' });
     }
 
     // 4. Publish via MQTT
     const mqttClient = getMqttClient();
     if (!mqttClient || !mqttClient.connected) {
-      return res.status(500).json({ success: false, error: 'MQTT client is not connected' });
+      return res.status(500).json({ success: false, code: 500, error: 'MQTT client is not connected' });
     }
 
     const payload = typeof command === 'string' ? command : JSON.stringify(command);
@@ -149,13 +204,13 @@ router.post('/control', async (req: Request, res: Response) => {
     mqttClient.publish(gateway.publish_topic, payload, { qos: 1 }, (err) => {
       if (err) {
         console.error('Failed to publish MQTT message:', err);
-        return res.status(500).json({ success: false, error: 'Failed to send command to gateway' });
+        return res.status(500).json({ success: false, code: 500, error: 'Failed to send command to gateway' });
       }
-      res.json({ success: true, message: 'Command sent successfully', data: { topic: gateway.publish_topic } });
+      res.json({ success: true, code: 0, message: 'Command sent successfully', data: { topic: gateway.publish_topic } });
     });
   } catch (error) {
     console.error('Error in /control API:', error);
-    res.status(500).json({ success: false, error: 'Internal server error' });
+    res.status(500).json({ success: false, code: 500, error: 'Internal server error' });
   }
 });
 

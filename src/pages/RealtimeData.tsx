@@ -35,6 +35,25 @@ const RealtimeData: React.FC = () => {
 
   // Search state
   const [searchQuery, setSearchQuery] = useState('');
+  const [secondaryQuery, setSecondaryQuery] = useState('');
+
+  const now = useMemo(() => new Date(), []);
+  const defaultStart = useMemo(() => {
+    const d = new Date(now);
+    d.setHours(0, 0, 0, 0); // 当天 00:00:00
+    return d;
+  }, [now]);
+  const defaultEnd = useMemo(() => new Date(), []);
+  const [startDate, setStartDate] = useState<string>(() => {
+    const d = defaultStart;
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:00`;
+  });
+  const [endDate, setEndDate] = useState<string>(() => {
+    const d = defaultEnd;
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  });
 
   // Pagination states
   const [currentPage, setCurrentPage] = useState(1);
@@ -43,12 +62,15 @@ const RealtimeData: React.FC = () => {
   // Reset pagination when view mode or search changes
   useEffect(() => {
     setCurrentPage(1);
-  }, [viewMode, searchQuery]);
+  }, [viewMode, searchQuery, secondaryQuery]);
 
   const fetchData = () => {
     setLoading(true);
-    // Fetch parsed telemetry
-    fetch('/api/gateways/telemetry')
+    const params = new URLSearchParams();
+    if (startDate) params.append('startDate', startDate);
+    if (endDate) params.append('endDate', endDate);
+    const headers: Record<string, string> = { 'Authorization': `Bearer ${localStorage.getItem('token') || ''}` };
+    fetch(`/api/gateways/telemetry?${params.toString()}`, { headers })
       .then(res => res.json())
       .then(res => {
         if (res.success) {
@@ -57,8 +79,7 @@ const RealtimeData: React.FC = () => {
       })
       .catch(err => console.error('Error fetching telemetry:', err));
 
-    // Fetch raw MQTT logs
-    fetch('/api/gateways/raw-logs')
+    fetch(`/api/gateways/raw-logs?${params.toString()}`, { headers })
       .then(res => res.json())
       .then(res => {
         if (res.success) {
@@ -80,7 +101,7 @@ const RealtimeData: React.FC = () => {
   };
 
   const filteredData = useMemo(() => {
-    return data.filter(item => {
+    const primary = data.filter(item => {
       const search = searchQuery.toLowerCase();
       return (
         item.gateway_sncode.toLowerCase().includes(search) ||
@@ -88,7 +109,13 @@ const RealtimeData: React.FC = () => {
         (item.project_name && item.project_name.toLowerCase().includes(search))
       );
     });
-  }, [data, searchQuery]);
+    if (!secondaryQuery) return primary;
+    const second = secondaryQuery.toLowerCase();
+    return primary.filter(item =>
+      (item.point_name && item.point_name.toLowerCase().includes(second)) ||
+      (item.insname && item.insname.toLowerCase().includes(second))
+    );
+  }, [data, searchQuery, secondaryQuery]);
 
   const sortedData = useMemo(() => {
     return [...filteredData].sort((a, b) => {
@@ -132,6 +159,29 @@ const RealtimeData: React.FC = () => {
       <div className="flex justify-between items-center">
         <h2 className="text-xl font-semibold text-gray-800">实时数据</h2>
         <div className="flex space-x-3">
+          <div className="flex items-center space-x-2 mr-2">
+            <input
+              type="datetime-local"
+              value={startDate}
+              onChange={(e) => setStartDate(e.target.value)}
+              className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
+              aria-label="开始时间"
+            />
+            <span className="text-gray-400">—</span>
+            <input
+              type="datetime-local"
+              value={endDate}
+              onChange={(e) => setEndDate(e.target.value)}
+              className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
+              aria-label="结束时间"
+            />
+            <button 
+              onClick={fetchData}
+              className="px-3 py-2 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-700"
+            >
+              载入
+            </button>
+          </div>
           <div className="flex bg-gray-100 p-1 rounded-lg mr-4">
             <button
               onClick={() => setViewMode('parsed')}
@@ -156,8 +206,15 @@ const RealtimeData: React.FC = () => {
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="搜索 网关SN / 项目编号 / 项目名称"
+            placeholder="筛选：网关SN / 项目编号 / 项目名称"
             className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none w-72 transition-all mr-2"
+          />
+          <input 
+            type="text"
+            value={secondaryQuery}
+            onChange={(e) => setSecondaryQuery(e.target.value)}
+            placeholder="二次筛选：实体编号 / 点位名称"
+            className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none w-60 transition-all mr-2"
           />
 
           <button 
@@ -220,7 +277,7 @@ const RealtimeData: React.FC = () => {
                       )}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{row.project_name || '-'}</td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{row.paraname || '-'}</td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700 font-medium">{row.point_name || '-'}</td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{row.insname || '-'}</td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{row.propertyno || '-'}</td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm font-bold text-blue-600">{row.value}</td>

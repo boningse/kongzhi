@@ -9,6 +9,7 @@ import SystemManagement from "./pages/SystemManagement";
 import WebSocketConfig from "./pages/WebSocketConfig";
 import DataDistribution from "./pages/DataDistribution";
 import DeviceTypeConfig from "./pages/DeviceTypeConfig";
+import PointManager from "./pages/PointManager";
 import Login from "./pages/Login";
 
 const PrivateRoute = ({ children }: { children: React.ReactNode }) => {
@@ -35,6 +36,7 @@ export default function App() {
                   <Route path="/realtime" element={<RealtimeData />} />
                   <Route path="/api-config" element={<ApiConfig />} />
                   <Route path="/data-distribution" element={<DataDistribution />} />
+                  <Route path="/points" element={<PointManager />} />
                   <Route path="/device-types" element={<DeviceTypeConfig />} />
                   <Route path="/ws-config" element={<WebSocketConfig />} />
                   <Route path="/system" element={<SystemManagement />} />

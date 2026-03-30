@@ -185,6 +185,85 @@ export async function distributeData(gatewaySncode: string, records: any[], ts: 
   }
 }
 
+export async function distributeDataForDist(distId: number, gatewaySncode: string, records: any[], ts: Date) {
+  if (!records || records.length === 0) return;
+  try {
+    const distRes = await localQuery(
+      `SELECT id, project_ids, target_db_type, target_db_config, start_time 
+       FROM data_distributions WHERE id = $1 AND status = 'ACTIVE'`,
+      [distId]
+    );
+    if (distRes.rowCount === 0) return;
+    const dist = distRes.rows[0] as Distribution & { project_ids: number[] };
+    if (dist.start_time) {
+      const startTime = new Date(dist.start_time);
+      if (ts < startTime) return;
+    }
+    // 获取网关所属项目及项目码
+    const gwResult = await localQuery('SELECT project_id FROM gateway_info WHERE sncode = $1', [gatewaySncode]);
+    const projectId = gwResult.rows?.[0]?.project_id;
+    const projResult = await localQuery('SELECT code FROM projects WHERE id = $1', [projectId]);
+    const projectCode = projResult.rowCount && projResult.rows[0].code ? projResult.rows[0].code : `proj_${projectId}`;
+    const dateObj = new Date(ts);
+    const yearMonth = `${dateObj.getFullYear()}${String(dateObj.getMonth() + 1).padStart(2, '0')}`;
+    const tableName = `${yearMonth}_recorddata_${projectCode}`;
+    const distData = records.map(r => [
+      r.insname || '',
+      r.propertyno ? parseInt(r.propertyno, 10) || 0 : 0,
+      formatDate(ts),
+      r.value !== null && r.value !== undefined ? parseFloat(r.value) : null,
+      1
+    ]);
+    if (dist.target_db_type === 'postgresql') {
+      const pool = getPgPool(dist.id, dist.target_db_config);
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS "${tableName}" (
+          "sign" VARCHAR(64),
+          "funcid" INT,
+          "receivetime" VARCHAR(64),
+          "data" NUMERIC,
+          "virtual" INT
+        );
+      `);
+      const insertQuery = format(`INSERT INTO "${tableName}" (sign, funcid, receivetime, data, virtual) VALUES %L`, distData);
+      await pool.query(insertQuery);
+    } else if (dist.target_db_type === 'mysql') {
+      const pool = getMysqlPool(dist.id, dist.target_db_config);
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS \`${tableName}\` (
+          \`sign\` VARCHAR(64),
+          \`funcid\` INT,
+          \`receivetime\` VARCHAR(64),
+          \`data\` DOUBLE,
+          \`virtual\` INT
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+      `);
+      if (distData.length > 0) {
+        await pool.query(`INSERT INTO \`${tableName}\` (sign, funcid, receivetime, data, virtual) VALUES ?`, [distData]);
+      }
+    } else if (dist.target_db_type === 'api') {
+      const config = dist.target_db_config;
+      const url = config.url;
+      const method = config.method || 'POST';
+      const headers = config.headers || {};
+      const payload = records.map(r => ({
+        sign: r.insname || '',
+        funcid: r.propertyno ? parseInt(r.propertyno, 10) || 0 : 0,
+        receivetime: formatDate(ts),
+        data: r.value !== null && r.value !== undefined ? parseFloat(r.value) : null,
+        virtual: 1
+      }));
+      fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json', ...headers },
+        body: JSON.stringify(payload)
+      }).catch(err => console.error(`API Distribution ${dist.id} failed:`, err));
+    }
+  } catch (e) {
+    console.error('distributeDataForDist error:', e);
+  }
+}
+
 function formatDate(date: Date): string {
   // 修正时差：加上 8 小时 (北京时间 UTC+8)
   const beijingTime = new Date(date.getTime() + 8 * 60 * 60 * 1000);

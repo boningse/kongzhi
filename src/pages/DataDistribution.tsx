@@ -31,7 +31,8 @@ const DataDistribution: React.FC = () => {
     source_data_info: '',
     target_db_type: 'mysql',
     target_db_config: '{}',
-    status: 'ACTIVE'
+    status: 'ACTIVE',
+    start_time: ''
   });
 
   useEffect(() => {
@@ -81,10 +82,18 @@ const DataDistribution: React.FC = () => {
       return alert('对方数据库设置信息必须是有效的 JSON 格式');
     }
 
-    const payload = {
+    const payload: any = {
       ...formData,
       target_db_config: parsedConfig
     };
+    if (formData.start_time) {
+      const dt = new Date(formData.start_time);
+      if (!isNaN(dt.getTime())) {
+        payload.start_time = dt.toISOString();
+      }
+    } else {
+      delete payload.start_time;
+    }
     
     // 如果是新建，且状态为ACTIVE，直接设置当前时间为开始时间可以由后端处理
     // 但是这里只传前端表单数据
@@ -111,7 +120,8 @@ const DataDistribution: React.FC = () => {
           source_data_info: '',
           target_db_type: 'mysql',
           target_db_config: '{}',
-          status: 'ACTIVE'
+          status: 'ACTIVE',
+          start_time: ''
         });
         fetchDistributions();
       } else {
@@ -130,7 +140,8 @@ const DataDistribution: React.FC = () => {
       source_data_info: dist.source_data_info || '',
       target_db_type: dist.target_db_type || 'mysql',
       target_db_config: JSON.stringify(dist.target_db_config, null, 2) || '{}',
-      status: dist.status || 'ACTIVE'
+      status: dist.status || 'ACTIVE',
+      start_time: dist.start_time ? new Date(dist.start_time).toISOString().slice(0,16) : ''
     });
     setIsModalOpen(true);
   };
@@ -213,7 +224,8 @@ const DataDistribution: React.FC = () => {
               source_data_info: '',
               target_db_type: 'mysql',
               target_db_config: '{\n  "host": "",\n  "port": 3306,\n  "user": "",\n  "password": "",\n  "database": ""\n}',
-              status: 'ACTIVE'
+              status: 'ACTIVE',
+              start_time: ''
             });
             setIsModalOpen(true);
           }}
@@ -414,6 +426,21 @@ const DataDistribution: React.FC = () => {
                       <option value="INACTIVE">已停止</option>
                     </select>
                   </div>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    开始分发时间（补发起点，可选）
+                  </label>
+                  <input
+                    type="datetime-local"
+                    value={formData.start_time}
+                    onChange={e => setFormData({ ...formData, start_time: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    留空则在启动时从当前时间开始；设置后仅分发时间 ≥ 该值的数据。
+                  </p>
                 </div>
 
                 <div>
