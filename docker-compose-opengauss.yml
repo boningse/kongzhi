@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  opengauss:
+    image: enmotech/opengauss:3.0.0
+    container_name: opengauss
+    privileged: true
+    environment:
+      - GS_PASSWORD=BoNing@123
+    ports:
+      - "5432:5432"
+    volumes:
+      - opengauss-data:/var/lib/opengauss/data
+    restart: always
+
+volumes:
+  opengauss-data:

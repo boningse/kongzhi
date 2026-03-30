@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  kongzhi-app:
+    build: .
+    container_name: kongzhi-app
+    restart: always
+    environment:
+      - TZ=Asia/Shanghai
+      - NODE_ENV=production
+      - PORT=3000
+      - DB_USER=${DB_USER:-omm}
+      - DB_PASSWORD=${DB_PASSWORD:-BoNing@123}
+      - DB_HOST=${DB_HOST:-127.0.0.1}
+      - DB_PORT=${DB_PORT:-5432}
+      - DB_NAME=${DB_NAME:-postgres}
+      - JWT_SECRET=${JWT_SECRET:-your-secret-key}
+      - MQTT_BROKER=${MQTT_BROKER:-mqtt://223.80.108.95:15007}
+      - MQTT_USERNAME=${MQTT_USERNAME:-boning}
+      - MQTT_PASSWORD=${MQTT_PASSWORD:-BoNing@123}
+    network_mode: "host" # Using host network to easily access local PostgreSQL if it's on the host

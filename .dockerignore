@@ -1,0 +1,10 @@
+node_modules
+dist
+.env
+.git
+.vscode
+*.log
+docker-compose.yml
+Dockerfile
+deploy.sh
+nginx-caiji.conf
